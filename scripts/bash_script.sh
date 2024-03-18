@@ -1,0 +1,1 @@
+./run_gemma_orpo_beta.sh 5,6 2

@@ -3,8 +3,9 @@ import os
 import time
 import wandb
 import torch
+import json
 import argparse
-from datasets import load_dataset
+from datasets import load_dataset, Dataset, concatenate_datasets
 from typing import List, Dict, Union
 from transformers import (
     AutoTokenizer,
@@ -13,9 +14,13 @@ from transformers import (
     DataCollatorForLanguageModeling
 )
 
-from src.args import default_args
-from src.orpo_trainer import ORPOTrainer
-from src.utils import preprocess_logits_for_metrics, dataset_split_selector
+from orpo.args import default_args
+from orpo.orpo_trainer import ORPOTrainer
+from orpo.utils import preprocess_logits_for_metrics, dataset_split_selector
+
+def load_jsonl_file(filepath: str):
+    with open(filepath, "r", encoding="utf-8") as fin:
+        return [json.loads(row) for row in fin]
 
 class ORPO(object):
     def __init__(self, args) -> None:
@@ -46,7 +51,39 @@ class ORPO(object):
                                                           
         # Load Dataset
         print(">>> 3. Loading Dataset")
-        self.data = load_dataset(self.args.data_name, cache_dir=self.args.cache_dir)
+        if ".jsonl" in self.args.data_name:
+            datasets_list = [Dataset.from_list(load_jsonl_file(self.args.data_name))]
+            dataset = concatenate_datasets(datasets_list)
+
+            language_map = {
+                "bn": "Bengali",
+                "de": "German",
+                "en": "English",
+                "es": "Spanish",
+                "fr": "French",
+                "ja": "Japanese",
+                "ru": "Russian",
+                "zh": "Chinese",
+                "sw": "Swahili",
+                "th": "Thai",
+            }
+            
+            train_datasets, test_datasets = [], []
+            lang_column_name = "language"
+            
+            for lang in language_map:
+                dataset_lang = dataset.filter(lambda x: x[lang_column_name] == lang)
+                dataset_lang = dataset_lang.train_test_split(test_size=0.1, seed=42)
+                train_datasets.append(dataset_lang["train"])
+                test_datasets.append(dataset_lang["test"])
+        
+            test_dataset = concatenate_datasets(test_datasets).shuffle(seed=42)
+            train_dataset = concatenate_datasets(train_datasets).shuffle(seed=42)
+            
+            self.data = {"train": train_dataset, "test": test_dataset}
+            self.args.data_name = self.args.data_name.replace(".jsonl", "")
+        else:
+            self.data = load_dataset(self.args.data_name, cache_dir=self.args.cache_dir)
 
         # Preprocess Dataset
         print(">>> 4. Filtering and Preprocessing Dataset")
@@ -79,6 +116,11 @@ class ORPO(object):
     def preprocess_dataset(self, examples: Union[List, Dict]):
         if 'instruction' in examples.keys():
             prompt_key = 'instruction'
+            prompt = [self.tokenizer.apply_chat_template([{'role': 'user', 'content': item}], tokenize=False, add_generation_prompt=True) for item in examples[prompt_key]]
+            chosen = [self.tokenizer.apply_chat_template([{'role': 'user', 'content': item_prompt}, {'role': 'assistant', 'content': item_chosen}], tokenize=False) for item_prompt, item_chosen in zip(examples[prompt_key], examples['chosen'])]
+            rejected = [self.tokenizer.apply_chat_template([{'role': 'user', 'content': item_prompt}, {'role': 'assistant', 'content': item_rejected}], tokenize=False) for item_prompt, item_rejected in zip(examples[prompt_key], examples['rejected'])]
+        elif 'input' in examples.keys():
+            prompt_key = 'input'
             prompt = [self.tokenizer.apply_chat_template([{'role': 'user', 'content': item}], tokenize=False, add_generation_prompt=True) for item in examples[prompt_key]]
             chosen = [self.tokenizer.apply_chat_template([{'role': 'user', 'content': item_prompt}, {'role': 'assistant', 'content': item_chosen}], tokenize=False) for item_prompt, item_chosen in zip(examples[prompt_key], examples['chosen'])]
             rejected = [self.tokenizer.apply_chat_template([{'role': 'user', 'content': item_prompt}, {'role': 'assistant', 'content': item_rejected}], tokenize=False) for item_prompt, item_rejected in zip(examples[prompt_key], examples['rejected'])]
